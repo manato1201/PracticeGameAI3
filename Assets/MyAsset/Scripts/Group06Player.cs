@@ -1,81 +1,93 @@
-/*
-	Start() を参考に、ターゲットの数と位置を取得しましょう
-	
-	Update() を参考に、ターゲットを選んで、そこにたどり着くように移動しましょう
-	
-	ターゲットを取ったら、TargetHit(int index) が呼び出されます。
-	index番のターゲットは取得済になるので、いい感じに処理しましょう
-*/
-
 using UnityEngine;
+using UnityEngine.AI;
+
 namespace Group06
 {
+    public class Group06Player : Pawn
+    {
+        [SerializeField] private float moveSpeed = 10f;
+        [SerializeField] private float stuckTimeLimit = 0.6f;
 
-public class Group06Player : Pawn
-{
-	public int set=0;
-	
-	int numTargets;
-	Vector3[] targetPositions;
-	int nextTarget;
-	
-	int step = 0;
-	
-	NavMeshTool navi;
-	
-	// Start is called before the first frame update
-	void Start()
-	{
-		// 経路探索機能を取得します
-		navi = GetNavMeshTool();
-		
-		// 今回のターゲットの数と場所を取得します
-		numTargets = GameManager.instance.NumTargets();
-		targetPositions = new Vector3[numTargets];
-		for(int i=0; i<numTargets; i++){
-			targetPositions[i] = GameManager.instance.TargetPosition(i);
-		}
-		
-		nextTarget = 0;
-	}
+        private NavMeshTool navi;
+        private Group06TeamCoordinator coordinator;
 
-	// Update is called once per frame
-	void Update()
-	{
-		switch(step){
-			case 0:
-				SetMoveSpeed(0f);
-				// 目的地を設定します
-				navi.SetDestination(targetPositions[nextTarget]);
-				step++;
-				break;
-			case 1:
-				// 経路探索が終わるまで待ちます
-				if(!navi.IsReady()){
-					break;
-				}
-				step++;
-				break;
-			case 2:
-				// 作成された経路に従って移動します
-				navi.UpdateCurrentPosition();
-				SetDirection(navi.MoveDirection());
-				SetMoveSpeed(5f);
-				// 目的地についたら、次の行動を設定します
-				if(navi.IsArrived()){
-					step = 0;
-				}
-				break;
-		}
-	}
-	
-	public override void TargetHit(int index)
-	{
-		// ターゲットと接触したら、そのターゲットの番号がわかります
-		Debug.Log("Get:"+index);
-	}
-	
+        private int agentId = -1;
+        private int currentTarget = -1;
+
+        private int step = 0;
+        private Vector3 lastPos;
+        private float stuckTimer = 0f;
+
+        // ★フィールド初期化で new しない（Unity6で禁止）
+        private NavMeshPath checkPath;
+
+        void Start()
+        {
+            // Pawn.Awake() が先に走って navi が作られている前提
+            navi = GetNavMeshTool();
+
+            // ★ここで生成（OK）
+            checkPath = new NavMeshPath();
+
+            lastPos = transform.position;
+        }
+
+        void Update()
+        {
+            if (coordinator == null) coordinator = GetComponentInParent<Group06TeamCoordinator>();
+            if (coordinator == null || !coordinator.IsActive || agentId < 0) { SetMoveSpeed(0); return; }
+
+            // 目的地が無い or 消えた なら次を貰う
+            if (currentTarget < 0 || !coordinator.IsTargetStillActive(currentTarget))
+            {
+                currentTarget = coordinator.GetNextTarget(agentId);
+                if (currentTarget < 0) { SetMoveSpeed(0); return; }
+
+                Vector3 goal = coordinator.GetTargetPosition(currentTarget);
+                navi.SetDestination(goal);
+                // ここで止めない
+            }
+
+            if (!navi.IsReady()) { SetMoveSpeed(moveSpeed); return; } // pathPending中も走らせてOK
+
+            Vector3 dir = navi.MoveDirection();
+            if (dir.sqrMagnitude < 0.0001f)
+            {
+                // 詰んだら次へ（Team側にRejectTarget用意してるなら呼ぶ）
+                coordinator.RejectTarget(agentId, currentTarget);
+                currentTarget = -1;
+                SetMoveSpeed(moveSpeed);
+                return;
+            }
+
+            SetDirection(dir);
+            SetMoveSpeed(moveSpeed);
+
+
+        }
+
+        private bool IsReachable(Vector3 start, Vector3 goal)
+        {
+            // 念のためnullガード
+            if (checkPath == null) checkPath = new NavMeshPath();
+
+            start.y = 0f; goal.y = 0f;
+            if (!NavMesh.CalculatePath(start, goal, NavMesh.AllAreas, checkPath))
+                return false;
+
+            return checkPath.status == NavMeshPathStatus.PathComplete;
+        }
+
+        public void SetCoordinator(Group06TeamCoordinator c, int id)
+        {
+            coordinator = c;
+            agentId = id;
+        }
+
+        public override void TargetHit(int index)
+        {
+            coordinator?.NotifyTargetHit(agentId, index);
+            if (currentTarget == index) currentTarget = -1;
+        }
+    }
 }
-		
-}	// Group06
-
