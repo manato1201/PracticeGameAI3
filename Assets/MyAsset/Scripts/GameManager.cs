@@ -15,7 +15,7 @@
 	その他：
 	public static GameManager instance;
 		インスタンスを取得します
-	
+
 	public void DispStr(string str)
 		str を画面に表示します
 		呼び出した順に上から表示します
@@ -33,11 +33,11 @@ public class GameManager : MonoBehaviour
 {
 	public static GameManager instance;
 	public Text text;
-	
+
 	// デバッグ用文字表示 DispStr用
 	GameObject scoreText;
 	StringBuilder buffer = new StringBuilder();
-	
+
 	int numTargets = 0;
 	Vector3[] targetPositions;
 	bool[] isTargetAvailable;
@@ -46,7 +46,7 @@ public class GameManager : MonoBehaviour
 	int targetsLeft;
 
 	public enum GroupID {
-		Group0,	
+		Group0,
 		Group1,
 		Group2,
 		Group3,
@@ -60,12 +60,12 @@ public class GameManager : MonoBehaviour
 	}
 
 	public GroupID groupNo = GroupID.Group0;
-	
+
 
 	void Awake()
 	{
 		instance = this;
-		
+
 		// 目標の管理
 		GameObject[] targets = GameObject.FindGameObjectsWithTag("Bomb");
 		numTargets = targets.Length;
@@ -74,24 +74,24 @@ public class GameManager : MonoBehaviour
 		targetPositions = new Vector3[numTargets];
 		isTargetAvailable = new bool[numTargets];
 		for(int i=0; i<numTargets; i++){
-			Target target = targets[i].GetComponent<Target>();		
+			Target target = targets[i].GetComponent<Target>();
 			targetPositions[i] = target.transform.position;
 			isTargetAvailable[i] = true;
 			target.index = i;
 		}
-		
+
 		GameObject team, chara_1, chara_2;
 		team = GameObject.Find("Team");
 		chara_1 = GameObject.Find("Chara_1");
 		chara_2 = GameObject.Find("Chara_2");
 		CharaSetup(groupNo, team, chara_1, chara_2);
 	}
-	
+
 	public int NumTargets()
 	{
 		return numTargets;
 	}
-	
+
 	public Vector3 TargetPosition(int index)
 	{
 		if(index < 0 || index >= numTargets){
@@ -99,17 +99,17 @@ public class GameManager : MonoBehaviour
 		}
 		return targetPositions[index];
 	}
-	
+
 	public bool IsTargetActive(int index)
 	{
 		if(index < 0 || index >= numTargets){
 			return false;
 		}
 		return isTargetAvailable[index];
-	
+
 	}
 
-	
+
 	// Start is called before the first frame update
 	void Start()
 	{
@@ -121,6 +121,7 @@ public class GameManager : MonoBehaviour
 	// Update is called once per frame
 	void Update()
 	{
+
 		if(targetsLeft <= 0){
 			float delta = clearTime - startTime;
 			text.text = "Finish:" + delta.ToString("N2") + "sec";
@@ -128,7 +129,7 @@ public class GameManager : MonoBehaviour
 			text.text = "Left:" + targetsLeft;
 		}
 	}
-	
+
 	public void decTarget(int index)
 	{
 		isTargetAvailable[index] = false;
@@ -137,7 +138,7 @@ public class GameManager : MonoBehaviour
 			clearTime = Time.time;
 		}
 	}
-	
+
 	void LateUpdate()
 	{
 		if(scoreText != null){
@@ -145,11 +146,11 @@ public class GameManager : MonoBehaviour
 		}
 		buffer.Clear();
 	}
-	
+
 	public void DispStr(string str){
 		buffer.Append(str + "\n");
 	}
-	
+
 	void CharaSetup(GroupID group, GameObject team, GameObject player1,GameObject player2){
 		switch(group){
 			case GroupID.Group1:
@@ -169,6 +170,7 @@ public class GameManager : MonoBehaviour
 			break;
 			case GroupID.Group6:
 			player1.AddComponent<Group06.Group06Player>();
+            player2.AddComponent<Group06.Group06Player>();
 			break;
 			case GroupID.Group7:
 			player1.AddComponent<Group07.Group07Player>();
