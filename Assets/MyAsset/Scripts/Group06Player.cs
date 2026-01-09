@@ -1,81 +1,119 @@
-/*
-	Start() を参考に、ターゲットの数と位置を取得しましょう
-	
-	Update() を参考に、ターゲットを選んで、そこにたどり着くように移動しましょう
-	
-	ターゲットを取ったら、TargetHit(int index) が呼び出されます。
-	index番のターゲットは取得済になるので、いい感じに処理しましょう
-*/
-
 using UnityEngine;
+using UnityEngine.AI;
+
 namespace Group06
 {
+    public class Group06Player : Pawn
+    {
+        public int set = 0;
 
-public class Group06Player : Pawn
-{
-	public int set=0;
-	
-	int numTargets;
-	Vector3[] targetPositions;
-	int nextTarget;
-	
-	int step = 0;
-	
-	NavMeshTool navi;
-	
-	// Start is called before the first frame update
-	void Start()
-	{
-		// 経路探索機能を取得します
-		navi = GetNavMeshTool();
-		
-		// 今回のターゲットの数と場所を取得します
-		numTargets = GameManager.instance.NumTargets();
-		targetPositions = new Vector3[numTargets];
-		for(int i=0; i<numTargets; i++){
-			targetPositions[i] = GameManager.instance.TargetPosition(i);
-		}
-		
-		nextTarget = 0;
-	}
+        NavMeshTool nav;
+        NavMeshPath path;
 
-	// Update is called once per frame
-	void Update()
-	{
-		switch(step){
-			case 0:
-				SetMoveSpeed(0f);
-				// 目的地を設定します
-				navi.SetDestination(targetPositions[nextTarget]);
-				step++;
-				break;
-			case 1:
-				// 経路探索が終わるまで待ちます
-				if(!navi.IsReady()){
-					break;
-				}
-				step++;
-				break;
-			case 2:
-				// 作成された経路に従って移動します
-				navi.UpdateCurrentPosition();
-				SetDirection(navi.MoveDirection());
-				SetMoveSpeed(5f);
-				// 目的地についたら、次の行動を設定します
-				if(navi.IsArrived()){
-					step = 0;
-				}
-				break;
-		}
-	}
-	
-	public override void TargetHit(int index)
-	{
-		// ターゲットと接触したら、そのターゲットの番号がわかります
-		Debug.Log("Get:"+index);
-	}
-	
+        int id, cur = -1, step = 0;
+
+        static int n = -1, usedMask = 0;
+        static Vector3[] pos;
+        static bool[] got;
+        static int[] owner;
+        static float[] ownerLen;
+
+        static void Init()
+        {
+            n = GameManager.instance.NumTargets();
+            pos = new Vector3[n];
+            got = new bool[n];
+            owner = new int[n];
+            ownerLen = new float[n];
+            for (int i = 0; i < n; i++)
+            {
+                pos[i] = GameManager.instance.TargetPosition(i);
+                owner[i] = -1;
+                ownerLen[i] = 1e30f;
+            }
+            usedMask = 0;
+        }
+
+        float PathLen(Vector3 a, Vector3 b)
+        {
+            if (!NavMesh.CalculatePath(a, b, NavMesh.AllAreas, path)) return 1e30f;
+            if (path.status != NavMeshPathStatus.PathComplete) return 1e30f;
+
+            var c = path.corners;
+            if (c == null || c.Length <= 1) return 0f;
+
+            float s = 0f;
+            for (int i = 1; i < c.Length; i++) s += Vector3.Distance(c[i - 1], c[i]);
+            return s;
+        }
+
+        void Start()
+        {
+            nav = GetNavMeshTool();
+            path = new NavMeshPath();
+
+            if (pos == null || n != GameManager.instance.NumTargets()) Init();
+
+            id = (set == 0 || set == 1) ? set : 0;
+            if ((usedMask & (1 << id)) != 0) id ^= 1; // 両方0でも分かれる
+            usedMask |= 1 << id;
+
+            Pick();
+        }
+
+        void Pick()
+        {
+            if (cur >= 0 && owner[cur] == id) { owner[cur] = -1; ownerLen[cur] = 1e30f; }
+
+            Vector3 p = transform.position;
+            float best = 1e30f;
+            int besti = -1;
+
+            const float stealEps = 0.1f; // 少しでも近い方が取る（ブレは最小限）
+
+            for (int i = 0; i < n; i++)
+            {
+                if (got[i]) continue;
+
+                float d = PathLen(p, pos[i]);
+                int o = owner[i];
+
+                // 他が同じターゲットを狙っていて、相手の方が十分近いなら避ける
+                if (o != -1 && o != id && d >= ownerLen[i] - stealEps) continue;
+
+                if (d < best) { best = d; besti = i; }
+            }
+
+            cur = besti;
+            if (cur >= 0) { owner[cur] = id; ownerLen[cur] = best; }
+            step = 0;
+        }
+
+        void Update()
+        {
+            if (pos == null) return;
+
+            // ターゲットが取られた/奪われた/無効なら即リプラン
+            if (cur < 0 || got[cur] || owner[cur] != id) Pick();
+            if (cur < 0) { SetMoveSpeed(0f); return; }
+
+            if (step == 0) { SetMoveSpeed(0f); nav.SetDestination(pos[cur]); step = 1; return; }
+            if (step == 1) { if (!nav.IsReady()) return; step = 2; }
+
+            nav.UpdateCurrentPosition();
+            SetDirection(nav.MoveDirection());
+            SetMoveSpeed(5f); // 速度固定なら内部で無視/クランプされるはず
+
+            if (nav.IsArrived()) SetMoveSpeed(0f);
+        }
+
+        public override void TargetHit(int index)
+        {
+            if (index < 0 || index >= n) return;
+            got[index] = true;
+            owner[index] = -1;
+            ownerLen[index] = 1e30f;
+            if (cur == index) cur = -1; // 次フレーム即Pick
+        }
+    }
 }
-		
-}	// Group06
-

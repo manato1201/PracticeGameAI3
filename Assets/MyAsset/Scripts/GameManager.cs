@@ -168,8 +168,9 @@ public class GameManager : MonoBehaviour
 			player1.AddComponent<Group05.Group05Player>();
 			break;
 			case GroupID.Group6:
-			player1.AddComponent<Group06.Group06Player>();
-			break;
+                player1.AddComponent<Group06.Group06Player>();
+                player2.AddComponent<Group06.Group06Player>();
+                break;
 			case GroupID.Group7:
 			player1.AddComponent<Group07.Group07Player>();
 			break;

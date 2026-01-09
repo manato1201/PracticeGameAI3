@@ -34783,7 +34783,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   text: {fileID: 10735328}
-  groupNo: 1
+  groupNo: 6
 --- !u!4 &2071698856
 Transform:
   m_ObjectHideFlags: 0
