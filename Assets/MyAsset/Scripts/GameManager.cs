@@ -11,6 +11,14 @@
 		index番のアイテムが残っていたら true を返します
 		消えていたら false を返します
 
+	public bool IsPlayerDead(TeamID team, int playerIndex)
+		team の teamIndex 番目のプレイヤーが死んでいたら true を返します
+		対象キャラクターがいない場合も true を返します
+
+	public Vector3 GetPlayerPosition(TeamID team, int playerIndex)
+		team の teamIndex 番目のプレイヤーの位置を返します
+		ただし、対象キャラクターがいない場合は Vector3.zero を返します
+
 	その他：
 	public static GameManager instance;
 		インスタンスを取得します
@@ -147,7 +155,7 @@ public class GameManager : MonoBehaviour
 	const int numTeamPlayers = 2;
 	class TeamStatus {
 		bool[] alive = new bool[numTeamPlayers];
-		Pawn[] members = new Pawn[numTeamPlayers];
+		public Pawn[] members = new Pawn[numTeamPlayers];
 		public void SetMember(int idx, Pawn p)
 		{
 			if(idx < 0 || idx >= numTeamPlayers)
@@ -177,6 +185,42 @@ public class GameManager : MonoBehaviour
 	TeamStatus teamB = new TeamStatus();
 
 	TeamID winner = TeamID.TeamZ;
+
+	public Vector3 GetPlayerPosition(TeamID team, int playerIndex)
+	{
+		if(playerIndex < 0 || playerIndex >= 2){
+			return Vector3.zero;
+		}
+		Pawn p = null;
+		if(team == TeamID.TeamA){
+			p = teamA.members[playerIndex];
+		}
+		if(team == TeamID.TeamB){
+			p = teamB.members[playerIndex];
+		}
+		if(!p){
+			return Vector3.zero;
+		}
+		return p.GetPosition();
+	}
+
+	public bool IsPlayerDead(TeamID team, int playerIndex)
+	{
+		if(playerIndex < 0 || playerIndex >= 2){
+			return true;
+		}
+		Pawn p = null;
+		if(team == TeamID.TeamA){
+			p = teamA.members[playerIndex];
+		}
+		if(team == TeamID.TeamB){
+			p = teamB.members[playerIndex];
+		}
+		if(!p){
+			return true;
+		}
+		return p.IsDead();
+	}
 
 	// Start is called before the first frame update
 	void Start()
@@ -461,24 +505,24 @@ public class GameManager : MonoBehaviour
 			//player2.AddComponent<Group02.Group02Player>();
 			break;
 			case GroupID.Group3:
-			// team.AddComponent<Group03.Group03Team>();
-			// player1.AddComponent<Group03.Group03Player>();
+			team.AddComponent<Group03.Group03Team>();
+			player1.AddComponent<Group03.Group03Player>();
 			//player2.AddComponent<Group03.Group03Player>();
 			break;
 			case GroupID.Group4:
-			// team.AddComponent<Group04.Group04Team>();
-			// player1.AddComponent<Group04.Group04Player>();
+			team.AddComponent<Group04.Group04Team>();
+			player1.AddComponent<Group04.Group04Player>();
 			//player2.AddComponent<Group04.Group04Player>();
 			break;
 			case GroupID.Group5:
-			// team.AddComponent<Group05.Group05Team>();
-			// player1.AddComponent<Group05.Group05Player>();
-			//player2.AddComponent<Group05.Group05Player>();
+			team.AddComponent<Group05.Group05Team>();
+			player1.AddComponent<Group05.Group05Player>();
+			player2.AddComponent<Group05.Group05Player>();
 			break;
 			case GroupID.Group6:
 			team.AddComponent<Group06.Group06Team>();
 			player1.AddComponent<Group06.Group06Player>();
-			//player2.AddComponent<Group06.Group06Player>();
+			player2.AddComponent<Group06.Group06Player>();
 			break;
 			case GroupID.Group7:
 			// team.AddComponent<Group07.Group07Team>();
@@ -488,7 +532,7 @@ public class GameManager : MonoBehaviour
 			case GroupID.Group8:
 			// team.AddComponent<Group08.Group08Team>();
 			// player1.AddComponent<Group08.Group08Player>();
-			//player2.AddComponent<Group08.Group08Player>();
+			// //player2.AddComponent<Group08.Group08Player>();
 			break;
 			case GroupID.Group9:
 			// team.AddComponent<Group09.Group09Team>();
