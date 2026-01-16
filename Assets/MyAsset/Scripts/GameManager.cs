@@ -505,13 +505,13 @@ public class GameManager : MonoBehaviour
 			//player2.AddComponent<Group02.Group02Player>();
 			break;
 			case GroupID.Group3:
-			team.AddComponent<Group03.Group03Team>();
-			player1.AddComponent<Group03.Group03Player>();
+			// team.AddComponent<Group03.Group03Team>();
+			// player1.AddComponent<Group03.Group03Player>();
 			//player2.AddComponent<Group03.Group03Player>();
 			break;
 			case GroupID.Group4:
-			team.AddComponent<Group04.Group04Team>();
-			player1.AddComponent<Group04.Group04Player>();
+			// team.AddComponent<Group04.Group04Team>();
+			// player1.AddComponent<Group04.Group04Player>();
 			//player2.AddComponent<Group04.Group04Player>();
 			break;
 			case GroupID.Group5:
