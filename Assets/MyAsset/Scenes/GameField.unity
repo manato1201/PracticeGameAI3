@@ -27925,7 +27925,7 @@ MonoBehaviour:
   endClip: {fileID: 8300000, guid: be1b6debdaac02d4b961cc97fe54c7a1, type: 3}
   warnClip: {fileID: 8300000, guid: b2c0a9c033b1f084c860c9d83b05a623, type: 3}
   teamA_Group: 10
-  teamB_Group: 10
+  teamB_Group: 5
 --- !u!1 &2083195099
 GameObject:
   m_ObjectHideFlags: 0

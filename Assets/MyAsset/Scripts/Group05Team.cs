@@ -82,14 +82,10 @@ namespace Group05
             if (assignLockTimer > 0f)
                 return assignedEnemy[Mathf.Clamp(myIndex, 0, 1)];
 
-            // 再割当（短周期でやると不安定になるのでロックする）
+            // 再割当
             Vector3 e0 = gm.GetPlayerPosition(enemyTeamId, 0);
             Vector3 e1 = gm.GetPlayerPosition(enemyTeamId, 1);
 
-            // 基本方針：
-            // - member0 が近い方を取る
-            // - member1 は残りを取る
-            // ※ これで「同じ対象に吸われる」を潰す
             float d0 = (e0 - myPos).sqrMagnitude;
             float d1 = (e1 - myPos).sqrMagnitude;
 
@@ -99,7 +95,7 @@ namespace Group05
             assignedEnemy[0] = m0;
             assignedEnemy[1] = m1;
 
-            assignLockTimer = 0.50f; // 半秒固定（グルグル対策）
+            assignLockTimer = 0.50f; // 半秒固定
 
             return assignedEnemy[Mathf.Clamp(myIndex, 0, 1)];
         }
