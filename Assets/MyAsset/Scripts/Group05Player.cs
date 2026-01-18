@@ -4,479 +4,719 @@ namespace Group05
 {
     public class Group05Player : Pawn
     {
-        private const int GROUP_NO = 5;
+        [Header("Intervals (NO every-frame heavy work)")]
+        [SerializeField] private float decisionInterval = 0.2f;
+        [SerializeField] private float bombScanInterval = 0.25f;
 
-        private static readonly Vector3[] DIRS =
-        {
-            Vector3.forward,
-            Vector3.back,
-            Vector3.left,
-            Vector3.right,
-        };
+        [Header("Throw / Combat")]
+        [SerializeField] private float maxThrowDistance = 8.5f;     // 遠距離先制
+        [SerializeField] private float throwSafetyMargin = 1.5f;    // 自爆しない余裕
+        [SerializeField] private float shootLineMaxDistance = 10f;  // 射線チェック上限
 
-        private NavMeshTool navi;
+        [Header("Evade")]
+        [SerializeField] private float bombDetectRadius = 10f;      // 周囲の爆弾を拾う範囲
+        [SerializeField] private int evadeSearchDepth = 3;          // 退避探索(2〜3推奨)
+
+        [Header("Anti-Stall (10 seconds same-cell penalty)")]
+        [SerializeField] private float stallLimitSeconds = 10f;     // ルール：10秒以上同じ場所で爆弾が来る
+        [SerializeField] private float throwFreezeSeconds = 3.5f;   // 投げた後の硬直
+        [SerializeField] private float stallSafetyMargin = 0.5f;    // 余裕
+        [SerializeField] private float preStallForceMoveAt = 9.0f;  // 9秒で強制1歩
+
         private Group05Team team;
-        private int myIndex = -1;
+        private NavMeshTool navi;
 
-        private Vector3 currentGoal;
-        private float goalReplanTimer = 0f;
+        private float nextDecisionTime = -1f;
+        private float nextBombScanTime = -1f;
 
-        // ---- state ----
-        private enum State { Chase, Retreat, BombEvade }
-        private State state = State.Chase;
+        private const int GridSize = Group05Team.GridMax + 1;
+        private readonly bool[,] danger = new bool[GridSize, GridSize];
 
-        // ---- timers ----
-        private float shootCooldown = 0f;
-        private float noShotTimer = 0f;
-        private float retreatTimer = 0f;
-        private float bombEvadeTimer = 0f;
-        private float zigzagFlip = 0f;
-        private int zigzagSign = 1;
+        // GC抑制
+        private readonly Collider[] bombHits = new Collider[64];
 
-        [Header("Replan")]
-        [SerializeField] private float replanInterval = 0.25f;
+        private int selfRole = 0; // 0:攻め 1:回り込み
 
-        [Header("Avoid teammate congestion")]
-        [SerializeField] private float mateKeepDist = 2.2f;
-        [SerializeField] private float mateHardAvoid = 1.2f;
-
-        [Header("Shoot rules")]
-        [SerializeField] private float alignEps = 0.55f;       // 縦横揃い判定
-        [SerializeField] private float minShootDist = 2.0f;    // 自爆防止（近すぎは撃たない）
-        [SerializeField] private float allyNear = 3.0f;        // 味方が近いと基本撃たない
-        [SerializeField] private float crossRange = 4.0f;      // 十字巻き込み判定
-        [SerializeField] private float allyEnemyClose = 1.8f;  // 味方と敵が近いなら攻撃寄せ
-
-        [Header("Retreat")]
-        [SerializeField] private float giveUpTime = 1.25f;     // 狙って撃てない時間
-        [SerializeField] private float retreatTime = 0.60f;    // 撤退継続
-        [SerializeField] private float retreatAfterShot = 0.35f; // 撃った直後の自爆回避撤退
-
-        [Header("Bomb Avoid")]
-        [SerializeField] private float bombDangerDist = 3.4f;  // 十字爆風想定（最低限）
-        [SerializeField] private float bombEvadeTime = 0.55f;  // 回避継続
-        [SerializeField] private float zigzagFlipInterval = 0.12f; // ジグザグ切替
-        [SerializeField] private float zigzagWeave = 0.55f;    // ジグザグの蛇行量
-
-        // 右優先ロック（迷ったら右、ただし個体差で左右を変える）
-        private bool preferLeft = false;
-        private float sideLockTimer = 0f;
-        private Vector3 lockedSide = Vector3.right;
+        // --- anti-stall state ---
+        private Vector3Int lastCell;
+        private float lastCellChangeTime;
+        private bool initializedCell = false;
+        private float freezeEndTime = -1f;
 
         void Start()
         {
-            SetGroupNo(GROUP_NO);
+            SetGroupNo(5);
 
-            navi = GetNavMeshTool();
             team = GetComponentInParent<Group05Team>();
+            navi = GetNavMeshTool();
+
+            int sib = transform.GetSiblingIndex();
+            selfRole = (sib == 0) ? 0 : 1;
+
+            nextDecisionTime = Time.time;
+            nextBombScanTime = Time.time;
+
             if (team != null)
             {
-                team.Register(this);
-                myIndex = team.IndexOf(this);
+                lastCell = team.WorldToCell(GetPosition());
+                lastCellChangeTime = Time.time;
+                initializedCell = true;
             }
-
-            // 2体が同じラインに寄りにくいように “右/左” を個体で分ける
-            preferLeft = (myIndex == 1);
-
-            currentGoal = GetPosition();
         }
 
         void Update()
         {
-            if (team != null && myIndex < 0)
+            if (IsDead()) return;
+
+            // セル変化監視（同じ場所に居続けた時間を管理）
+            if (team != null)
             {
-                myIndex = team.IndexOf(this);
-                preferLeft = (myIndex == 1);
+                Vector3Int nowCell = team.WorldToCell(GetPosition());
+                if (!initializedCell)
+                {
+                    lastCell = nowCell;
+                    lastCellChangeTime = Time.time;
+                    initializedCell = true;
+                }
+                else if (nowCell != lastCell)
+                {
+                    lastCell = nowCell;
+                    lastCellChangeTime = Time.time;
+                }
             }
 
-            float dt = Time.deltaTime;
-            if (shootCooldown > 0f) shootCooldown -= dt;
-            sideLockTimer -= dt;
+            float now = Time.time;
+
+            if (now >= nextBombScanTime)
+            {
+                RebuildDangerMap();
+                nextBombScanTime = now + bombScanInterval;
+            }
+
+            if (now < nextDecisionTime) return;
+            nextDecisionTime = now + decisionInterval;
+
+            ThinkAndAct();
+        }
+
+        private void ThinkAndAct()
+        {
+            if (team == null) return;
 
             Vector3 myPos = GetPosition();
-            Vector3 matePos = (team != null) ? team.GetMatePosition(myIndex) : Vector3.zero;
+            Vector3Int myCell = team.WorldToCell(myPos);
 
-            int enemyAlive = (team != null) ? team.EnemyAliveCount() : 2;
-            Vector3 enemyPos = (team != null) ? team.GetEnemyPositionByAssigned(myIndex, myPos) : Vector3.zero;
+            // --- Anti-stall: 9秒を超えたら何より先に1歩動く（止まる＝爆弾が来るルール対策）
+            float sameCellTime = Time.time - lastCellChangeTime;
 
-            // ====== 0) 爆弾回避は最優先（自爆も他爆も含む） ======
-            if (DetectBombAxis(myPos, out Vector3 dangerAxis))
+            if (sameCellTime >= preStallForceMoveAt)
             {
-                state = State.BombEvade;
-                bombEvadeTimer = bombEvadeTime;
-                zigzagFlip = 0f;
-                zigzagSign = 1;
-            }
-
-            if (state == State.BombEvade)
-            {
-                bombEvadeTimer -= dt;
-                DoBombEvade(myPos, matePos, dangerAxis: GuessDangerAxis(myPos));
-                if (bombEvadeTimer <= 0f)
+                if (TryForceStepToResetStall(out Vector3 step))
                 {
-                    state = State.Chase;
-                    noShotTimer = 0f;
-                }
-                return;
-            }
-
-            // ====== 1) 撤退中も爆弾優先（上で処理済み） ======
-            if (state == State.Retreat)
-            {
-                retreatTimer -= dt;
-                DoRetreat(myPos, matePos, enemyPos);
-                if (retreatTimer <= 0f)
-                {
-                    state = State.Chase;
-                    noShotTimer = 0f;
-                }
-                return;
-            }
-
-            // ====== 2) 近距離は「整列＋撃つ」を優先（NavMesh周回を抑える） ======
-            if (enemyPos != Vector3.zero)
-            {
-                bool shot = TryShoot(enemyPos, myPos, matePos, enemyAlive);
-                if (shot)
-                {
-                    // 撃てたら自爆回避のため即撤退（短時間）
-                    state = State.Retreat;
-                    retreatTimer = retreatAfterShot;
-                    noShotTimer = 0f;
+                    MoveToward(myPos, step, 1f);
                     return;
                 }
-                else
+                // それでも動けないなら、とにかく方向を変える（完全停止を避ける）
+                MoveDirectionSafe(-GetDirection(), 0.8f);
+                return;
+            }
+
+            // フリーズ明けはまず1歩動いて「同じ場所時間」を切る
+            if (freezeEndTime > 0f && Time.time >= freezeEndTime)
+            {
+                freezeEndTime = -1f;
+                if (TryForceStepToResetStall(out Vector3 stepAfterFreeze))
                 {
-                    noShotTimer += dt;
-                    if (noShotTimer >= giveUpTime)
+                    MoveToward(myPos, stepAfterFreeze, 1f);
+                    return;
+                }
+            }
+
+            // 0) いま危険セルなら最優先で退避（硬直中に巻き込まれるのが一番負け筋）
+            if (IsDanger(myCell))
+            {
+                if (TryEvadeToSafe(myPos, out Vector3 evadeNext))
+                {
+                    MoveToward(myPos, evadeNext, 1f);
+                    return;
+                }
+                // 退避できないなら、最低限「同じ場所」を避ける
+                if (TryForceStepToResetStall(out Vector3 step))
+                {
+                    MoveToward(myPos, step, 1f);
+                    return;
+                }
+                SetMoveSpeedRatio(0f);
+                return;
+            }
+
+            // 1) 遠距離投げ（接近しない）
+            if (TryThrowFromDistance(myPos))
+                return;
+
+            // 2) 目的地選択
+            Vector3 target = PickTarget(myPos);
+
+            // 3) 次の1手（dangerセルは避ける）
+            if (TryGetSafeNextStep(myPos, target, out Vector3 next))
+            {
+                MoveToward(myPos, next, 1f);
+                return;
+            }
+
+            // 4) フォールバック（NavMesh）
+            if (navi != null)
+            {
+                navi.SetDestination(target);
+                if (navi.IsReady())
+                {
+                    Vector3 dir = navi.MoveDirection();
+                    if (dir.sqrMagnitude > 0.0001f)
                     {
-                        state = State.Retreat;
-                        retreatTimer = retreatTime;
+                        MoveDirectionSafe(dir.normalized, 1f);
                         return;
                     }
                 }
             }
 
-            // ====== 3) 追跡ゴール更新（頻繁に変えると角で震える） ======
-            goalReplanTimer -= dt;
-            if (goalReplanTimer <= 0f)
-            {
-                goalReplanTimer = replanInterval;
-
-                currentGoal = (team != null) ? team.GetAttackGoal(myIndex, myPos) : new Vector3(8f, 0f, 8f);
-
-                // 味方が近いならゴールを左右にズラして詰まり軽減
-                currentGoal = ApplyGoalOffsetByMate(currentGoal, myPos, matePos);
-
-                navi.SetDestination(currentGoal);
-            }
-
-            Vector3 dir = navi.IsReady() ? navi.MoveDirection() : GetDirection();
-            dir = ApplySeparation(dir, myPos, matePos);
-
-            SetDirection(dir);
-            SetMoveSpeedRatio(1.0f);
+            // 5) 最後：直線
+            Vector3 d = (target - myPos);
+            d.y = 0f;
+            if (d.sqrMagnitude > 0.0001f)
+                MoveDirectionSafe(d.normalized, 0.8f);
+            else
+                SetMoveSpeedRatio(0f);
         }
 
-        // ----------------------------
-        // 爆弾検知：4方向Rayで、危険距離内に Bomb が「先に」当たったら危険
-        // ----------------------------
-        private bool DetectBombAxis(Vector3 myPos, out Vector3 dangerAxis)
+        // -------------------------
+        // Danger map (爆風セル予測)
+        // -------------------------
+        private void RebuildDangerMap()
         {
-            dangerAxis = Vector3.zero;
+            for (int x = 0; x < GridSize; x++)
+                for (int z = 0; z < GridSize; z++)
+                    danger[x, z] = false;
 
-            Vector3 start = myPos;
-            start.y = 0.5f;
+            if (team == null) return;
 
-            for (int i = 0; i < 4; i++)
+            int hitCount = Physics.OverlapSphereNonAlloc(GetPosition(), bombDetectRadius, bombHits);
+            for (int i = 0; i < hitCount; i++)
             {
-                Ray ray = new Ray(start, DIRS[i]);
-                if (!Physics.Raycast(ray, out var hit, bombDangerDist)) continue;
-                if (hit.collider == null) continue;
+                Collider col = bombHits[i];
+                if (col == null) continue;
 
-                // 壁が先なら爆風は遮られる前提で無視
-                if (hit.collider.gameObject.layer == LayerMask.NameToLayer("Wall"))
+                Bomb bomb = col.GetComponentInParent<Bomb>();
+                if (bomb == null) continue;
+
+                // NOTE: 変数名が違うならここだけ直す
+                int level = bomb.level;
+
+                Vector3Int bcell = team.WorldToCell(bomb.transform.position);
+                MarkExplosionCross(bcell, level);
+            }
+        }
+
+        private void MarkExplosionCross(Vector3Int center, int level)
+        {
+            if (!InGrid(center)) return;
+
+            danger[center.x, center.z] = true;
+
+            MarkDir(center, level, 1, 0);
+            MarkDir(center, level, -1, 0);
+            MarkDir(center, level, 0, 1);
+            MarkDir(center, level, 0, -1);
+        }
+
+        private void MarkDir(Vector3Int c, int level, int dx, int dz)
+        {
+            for (int s = 1; s <= level; s++)
+            {
+                Vector3Int n = new Vector3Int(c.x + dx * s, 0, c.z + dz * s);
+                if (!InGrid(n)) break;
+
+                // 壁で止まる（壁セル自体は爆風が通らない前提）
+                if (!team.IsWalkable(n))
+                    break;
+
+                danger[n.x, n.z] = true;
+            }
+        }
+
+        private bool InGrid(Vector3Int cell)
+        {
+            return cell.x >= Group05Team.GridMin && cell.x <= Group05Team.GridMax
+                && cell.z >= Group05Team.GridMin && cell.z <= Group05Team.GridMax;
+        }
+
+        private bool IsDanger(Vector3Int cell)
+        {
+            if (!InGrid(cell)) return true;
+            return danger[cell.x, cell.z];
+        }
+
+        // -------------------------
+        // Anti-stall: 強制1歩
+        // -------------------------
+        private bool TryForceStepToResetStall(out Vector3 stepWorld)
+        {
+            stepWorld = GetPosition();
+            if (team == null) return false;
+
+            Vector3Int c = team.WorldToCell(GetPosition());
+
+            // 4近傍から「歩けて」「dangerじゃない」を優先
+            Vector3Int[] cand =
+            {
+                new Vector3Int(c.x + 1, 0, c.z),
+                new Vector3Int(c.x - 1, 0, c.z),
+                new Vector3Int(c.x, 0, c.z + 1),
+                new Vector3Int(c.x, 0, c.z - 1),
+            };
+
+            for (int i = 0; i < cand.Length; i++)
+            {
+                Vector3Int n = cand[i];
+                if (!InGrid(n)) continue;
+                if (!team.IsWalkable(n)) continue;
+                if (IsDanger(n)) continue;
+
+                stepWorld = team.CellToWorld(n);
+                return true;
+            }
+
+            // 全部dangerなら「walkable」だけでもいい（停止よりマシ）
+            for (int i = 0; i < cand.Length; i++)
+            {
+                Vector3Int n = cand[i];
+                if (!InGrid(n)) continue;
+                if (!team.IsWalkable(n)) continue;
+
+                stepWorld = team.CellToWorld(n);
+                return true;
+            }
+
+            return false;
+        }
+
+        // -------------------------
+        // Evade (危険セルからの退避)
+        // -------------------------
+        private bool TryEvadeToSafe(Vector3 myPos, out Vector3 evadeNext)
+        {
+            evadeNext = myPos;
+
+            Vector3Int start = team.WorldToCell(myPos);
+            if (!InGrid(start)) return false;
+
+            // 深さ制限BFS（ノード数小さいので配列でOK）
+            const int MaxQ = 512;
+            Vector3Int[] qCell = new Vector3Int[MaxQ];
+            int[] qDepth = new int[MaxQ];
+            int head = 0, tail = 0;
+
+            bool[,] visited = new bool[GridSize, GridSize];
+            visited[start.x, start.z] = true;
+            qCell[tail] = start;
+            qDepth[tail] = 0;
+            tail++;
+
+            Vector3Int best = start;
+            bool found = false;
+
+            while (head < tail)
+            {
+                Vector3Int c = qCell[head];
+                int d = qDepth[head];
+                head++;
+
+                if (!IsDanger(c) && team.IsWalkable(c))
+                {
+                    best = c;
+                    found = true;
+                    break;
+                }
+
+                if (d >= evadeSearchDepth) continue;
+
+                TryEnqueue(c.x + 1, c.z, d + 1);
+                TryEnqueue(c.x - 1, c.z, d + 1);
+                TryEnqueue(c.x, c.z + 1, d + 1);
+                TryEnqueue(c.x, c.z - 1, d + 1);
+            }
+
+            if (!found) return false;
+
+            Vector3 goal = team.CellToWorld(best);
+            if (team.TryGetNextStepOnGrid(myPos, goal, out Vector3 next))
+            {
+                evadeNext = next;
+                return true;
+            }
+
+            return false;
+
+            void TryEnqueue(int x, int z, int depth)
+            {
+                if (x < Group05Team.GridMin || x > Group05Team.GridMax) return;
+                if (z < Group05Team.GridMin || z > Group05Team.GridMax) return;
+                if (visited[x, z]) return;
+
+                Vector3Int n = new Vector3Int(x, 0, z);
+                if (!team.IsWalkable(n)) return;
+
+                visited[x, z] = true;
+                if (tail < MaxQ)
+                {
+                    qCell[tail] = n;
+                    qDepth[tail] = depth;
+                    tail++;
+                }
+            }
+        }
+
+        // -------------------------
+        // Throw (遠距離先制 + 停止ペナルティ対策)
+        // -------------------------
+        private bool TryThrowFromDistance(Vector3 myPos)
+        {
+            // 直近で同じセルに居すぎるなら、投げると3.5秒固定で死にやすいので投げない
+            float sameCellTime = Time.time - lastCellChangeTime;
+            float latestSafeThrowTime = stallLimitSeconds - throwFreezeSeconds - stallSafetyMargin; // 10 - 3.5 - 0.5 = 6.0
+            if (sameCellTime > latestSafeThrowTime)
+                return false;
+
+            // 近くが危険なら投げない（硬直死）
+            if (HasNearbyDanger(myPos, 2.5f))
+                return false;
+
+            // 敵2体のうち生存してる方を狙う
+            for (int e = 0; e < 2; e++)
+            {
+                if (!team.TryGetEnemy(e, out Vector3 epos, out bool alive) || !alive)
                     continue;
 
-                if (hit.collider.CompareTag("Bomb"))
-                {
-                    // forward/backに爆弾 → 縦軸が危険（横へ抜ける）
-                    // left/rightに爆弾 → 横軸が危険（縦へ抜ける）
-                    dangerAxis = (i == 0 || i == 1) ? Vector3.forward : Vector3.right;
-                    return true;
-                }
-            }
-            return false;
-        }
+                Vector3 delta = epos - myPos;
+                delta.y = 0f;
 
-        // BombEvade中に「今どっち軸が危険か」を雑に復元（毎フレームDetectを重ねすぎない）
-        private Vector3 GuessDangerAxis(Vector3 myPos)
-        {
-            if (DetectBombAxis(myPos, out var axis)) return axis;
-            return Vector3.forward; // 見失ったらどちらでも良いが、回避自体は継続
-        }
+                float dist = delta.magnitude;
+                if (dist < 0.001f) continue;
+                if (dist > maxThrowDistance) continue;
 
-        // ----------------------------
-        // 爆弾回避：直交方向に抜けつつジグザグ（直線逃げ禁止）
-        // ----------------------------
-        private void DoBombEvade(Vector3 myPos, Vector3 matePos, Vector3 dangerAxis)
-        {
-            Vector3 baseEvade = (dangerAxis == Vector3.forward) ? Vector3.right : Vector3.forward;
+                // 射線（縦横）だけを狙う：先制で強い
+                if (!GetAlignedCardinal(delta, out Vector3 dir))
+                    continue;
 
-            // 左右のどっちが空いてるか（僅差なら右、ただし preferLeft は左）
-            float d0 = DistanceToWallDir(myPos, baseEvade);
-            float d1 = DistanceToWallDir(myPos, -baseEvade);
+                // 自爆ライン回避（安全距離）
+                float minSafe = 4f + throwSafetyMargin;
+                if (dist < minSafe) continue;
 
-            Vector3 bestBase;
-            float diff = d0 - d1;
-            const float tieEps = 0.05f;
+                // 味方が射線にいるなら投げない
+                if (IsFriendOnLine(myPos, dir, dist))
+                    continue;
 
-            if (Mathf.Abs(diff) <= tieEps)
-            {
-                bestBase = preferLeft ? -baseEvade : baseEvade; // 迷ったら右（個体は左）
-            }
-            else
-            {
-                bestBase = (d0 >= d1) ? baseEvade : -baseEvade;
-            }
+                // 壁が手前にあるなら投げない（手前で止まって自爆しやすい）
+                float wall = DistanceToWall(dir);
+                if (wall + 0.1f < dist)
+                    continue;
 
-            // ジグザグの切替
-            zigzagFlip -= Time.deltaTime;
-            if (zigzagFlip <= 0f)
-            {
-                zigzagFlip = zigzagFlipInterval;
-                zigzagSign = -zigzagSign;
-            }
+                // 自分のセルがdangerなら投げない（硬直死）
+                if (IsDanger(team.WorldToCell(myPos)))
+                    continue;
 
-            Vector3 weave = (dangerAxis == Vector3.forward) ? Vector3.forward : Vector3.right;
-            Vector3 dir = (bestBase + weave * (zigzagWeave * zigzagSign)).normalized;
-
-            // 味方が近すぎるなら離す（巻き込み＆詰まり防止）
-            if (matePos != Vector3.zero)
-            {
-                Vector3 dm = myPos - matePos; dm.y = 0f;
-                if (dm.sqrMagnitude < mateHardAvoid * mateHardAvoid && dm.sqrMagnitude > 0.0001f)
-                    dir = (dir + dm.normalized * 1.2f).normalized;
-            }
-
-            // 壁に突っ込むならベース方向のみ
-            if (DistanceToWallDir(myPos, dir) < 0.8f)
-                dir = bestBase.normalized;
-
-            SetDirection(dir);
-            SetMoveSpeedRatio(1.0f);
-        }
-
-        // ----------------------------
-        // 撤退：敵から距離を取って位置を作り直す（爆風ラインから抜ける）
-        // ----------------------------
-        private void DoRetreat(Vector3 myPos, Vector3 matePos, Vector3 enemyPos)
-        {
-            Vector3 away = Vector3.back;
-            if (enemyPos != Vector3.zero)
-            {
-                away = myPos - enemyPos; away.y = 0f;
-                if (away.sqrMagnitude < 0.0001f) away = Vector3.back;
-            }
-            away.Normalize();
-
-            Vector3 side = GetLockedSide(myPos, myPos + away);
-            Vector3 dir = (away + side * 0.7f).normalized;
-
-            // 味方が近すぎるならさらに離す
-            if (matePos != Vector3.zero)
-            {
-                Vector3 dm = myPos - matePos; dm.y = 0f;
-                if (dm.sqrMagnitude < mateHardAvoid * mateHardAvoid && dm.sqrMagnitude > 0.0001f)
-                    dir = (dir + dm.normalized * 1.2f).normalized;
-            }
-
-            // 壁に近いなら反対側へ（角震えの抑制）
-            if (DistanceToWallDir(myPos, dir) < 0.8f)
-                dir = (dir + side).normalized;
-
-            SetDirection(dir);
-            SetMoveSpeedRatio(1.0f);
-        }
-
-        // ----------------------------
-        // 味方に寄らないようにゴールを左右へオフセット
-        // ----------------------------
-        private Vector3 ApplyGoalOffsetByMate(Vector3 goal, Vector3 myPos, Vector3 matePos)
-        {
-            if (matePos == Vector3.zero) return goal;
-
-            Vector3 dm = myPos - matePos; dm.y = 0f;
-            if (dm.sqrMagnitude > mateKeepDist * mateKeepDist) return goal;
-
-            Vector3 side = GetLockedSide(myPos, goal);
-            return goal + side * 1.2f;
-        }
-
-        private Vector3 ApplySeparation(Vector3 dir, Vector3 myPos, Vector3 matePos)
-        {
-            if (matePos == Vector3.zero) return dir;
-
-            Vector3 dm = myPos - matePos; dm.y = 0f;
-            float dsq = dm.sqrMagnitude;
-
-            if (dsq > 0.0001f && dsq < mateKeepDist * mateKeepDist)
-            {
-                Vector3 sep = dm.normalized;
-                Vector3 side = GetLockedSide(myPos, myPos + dir);
-                dir = (dir + sep * 1.0f + side * 0.6f).normalized;
-            }
-            return dir;
-        }
-
-        // ----------------------------
-        // 右か左で迷ったら右（個体差で左）。短時間ロックでクルクル防止
-        // ----------------------------
-        private Vector3 GetLockedSide(Vector3 from, Vector3 to)
-        {
-            Vector3 v = to - from; v.y = 0f;
-            if (v.sqrMagnitude < 0.0001f) v = Vector3.forward;
-            v.Normalize();
-
-            Vector3 right = new Vector3(v.z, 0f, -v.x);
-            if (right.sqrMagnitude < 0.0001f) right = Vector3.right;
-            right.Normalize();
-
-            if (sideLockTimer <= 0f)
-            {
-                lockedSide = preferLeft ? -right : right;
-                sideLockTimer = 0.30f;
-            }
-            return lockedSide;
-        }
-
-        // ----------------------------
-        // 壁距離（Wallレイヤー優先。これがブレるとガタガタの原因）
-        // ----------------------------
-        private float DistanceToWallDir(Vector3 myPos, Vector3 dir)
-        {
-            Vector3 start = myPos;
-            start.y = 0.5f;
-
-            if (dir.sqrMagnitude < 0.0001f) return 10f;
-            dir.Normalize();
-
-            Ray ray = new Ray(start, dir);
-            if (Physics.Raycast(ray, out var hit, 10f))
-            {
-                if (hit.collider != null && hit.collider.gameObject.layer == LayerMask.NameToLayer("Wall"))
-                    return hit.distance;
-
-                // 壁じゃないものに当たった場合は「壁ではない」ので遠い扱い（震え軽減）
-                return 10f;
-            }
-            return 10f;
-        }
-
-        // ----------------------------
-        // 射撃：
-        // - 自爆しない（近すぎは撃たない）
-        // - 味方巻き込み抑制（ただし「敵が1体」なら緩める）
-        // - 味方と敵が近いなら攻撃優先に寄せる
-        // ----------------------------
-        private bool TryShoot(Vector3 enemyPos, Vector3 myPos, Vector3 matePos, int enemyAlive)
-        {
-            if (shootCooldown > 0f) return false;
-            // --- 追加：壁越し撃ち禁止（壁に当てて自滅するのを防ぐ） ---
-            if (IsShotBlockedByWall(myPos, enemyPos))
-                return false;
-
-            // --- 追加：撃つ向きの手前に壁が近いなら撃たない（壁密着自爆防止） ---
-            if (IsWallTooCloseInShotDirection(myPos, enemyPos))
-                return false;
-
-            Vector3 d = enemyPos - myPos; d.y = 0f;
-            if (d.sqrMagnitude < minShootDist * minShootDist) return false;
-
-            bool lastEnemy = (enemyAlive <= 1);
-
-            // 味方と敵が近いなら攻撃寄せ
-            bool allyEnemyNear = false;
-            if (matePos != Vector3.zero && enemyPos != Vector3.zero)
-                allyEnemyNear = (matePos - enemyPos).sqrMagnitude <= (allyEnemyClose * allyEnemyClose);
-
-            if (matePos != Vector3.zero)
-            {
-                Vector3 m = matePos - myPos; m.y = 0f;
-
-                if (!allyEnemyNear && !lastEnemy && m.sqrMagnitude < allyNear * allyNear) return false;
-
-                if (!allyEnemyNear && !lastEnemy)
-                {
-                    if (Mathf.Abs(m.x) < alignEps && Mathf.Abs(m.z) < crossRange) return false;
-                    if (Mathf.Abs(m.z) < alignEps && Mathf.Abs(m.x) < crossRange) return false;
-                }
-            }
-
-            // 縦横が揃ったら撃つ
-            if (Mathf.Abs(d.x) < alignEps)
-            {
-                SetDirection((d.z >= 0f) ? Vector3.forward : Vector3.back);
+                // 投げる
+                SetDirection(dir);
+                SetMoveSpeedRatio(0f);
                 ShootBomb();
-                shootCooldown = 1.0f;
-                return true;
-            }
-            if (Mathf.Abs(d.z) < alignEps)
-            {
-                SetDirection((d.x >= 0f) ? Vector3.right : Vector3.left);
-                ShootBomb();
-                shootCooldown = 1.0f;
+
+                // フリーズ明けに1歩動かすためのトリガ
+                freezeEndTime = Time.time + throwFreezeSeconds;
+
                 return true;
             }
 
             return false;
         }
 
-        // 壁越し（直線が壁で遮られている）なら true
-        private bool IsShotBlockedByWall(Vector3 myPos, Vector3 enemyPos)
+        private bool HasNearbyDanger(Vector3 pos, float radius)
         {
-            Vector3 a = myPos;   a.y = 0.5f;
-            Vector3 b = enemyPos; b.y = 0.5f;
+            Vector3Int c = team.WorldToCell(pos);
+            if (!InGrid(c)) return true;
 
-            Vector3 dir = b - a;
-            float dist = dir.magnitude;
-            if (dist <= 0.01f) return false;
-
-            dir /= dist;
-
-            // 途中で Wall に当たったら「壁越し」
-            if (Physics.Raycast(a, dir, out var hit, dist))
+            int r = Mathf.Clamp(Mathf.CeilToInt(radius), 1, 3);
+            for (int dx = -r; dx <= r; dx++)
             {
-                if (hit.collider != null && hit.collider.gameObject.layer == LayerMask.NameToLayer("Wall"))
-                    return true;
+                for (int dz = -r; dz <= r; dz++)
+                {
+                    Vector3Int n = new Vector3Int(c.x + dx, 0, c.z + dz);
+                    if (!InGrid(n)) continue;
+                    if (IsDanger(n)) return true;
+                }
             }
             return false;
         }
 
-// 撃つ予定の方向に「近い壁」があるなら true（壁に向けて撃つ自爆を減らす）
-        private bool IsWallTooCloseInShotDirection(Vector3 myPos, Vector3 enemyPos)
+        private bool GetAlignedCardinal(Vector3 delta, out Vector3 dir)
         {
-            Vector3 d = enemyPos - myPos; d.y = 0f;
-            if (d.sqrMagnitude < 0.0001f) return true;
+            dir = Vector3.zero;
+            float ax = Mathf.Abs(delta.x);
+            float az = Mathf.Abs(delta.z);
 
-            // 十字のどっちで撃つか（TryShootと同じ判定）
-            Vector3 shotDir;
-            if (Mathf.Abs(d.x) < alignEps)
-                shotDir = (d.z >= 0f) ? Vector3.forward : Vector3.back;
-            else if (Mathf.Abs(d.z) < alignEps)
-                shotDir = (d.x >= 0f) ? Vector3.right : Vector3.left;
-            else
-                return false; // そもそも撃てない状態
-
-            // すぐ目の前に壁があるなら撃たない
-            Vector3 start = myPos; start.y = 0.5f;
-            if (Physics.Raycast(start, shotDir, out var hit, 1.2f))
+            // ほぼ縦 or 横
+            if (ax > az * 2f)
             {
-                if (hit.collider != null && hit.collider.gameObject.layer == LayerMask.NameToLayer("Wall"))
-                    return true;
+                dir = (delta.x > 0f) ? Vector3.right : Vector3.left;
+                return true;
             }
+            if (az > ax * 2f)
+            {
+                dir = (delta.z > 0f) ? Vector3.forward : Vector3.back;
+                return true;
+            }
+
             return false;
         }
 
+        private bool IsFriendOnLine(Vector3 myPos, Vector3 dir, float enemyDist)
+        {
+            GameObject friend = GetFriend();
+            if (friend == null) return false;
+
+            Vector3 f = friend.transform.position;
+            Vector3 df = f - myPos;
+            df.y = 0f;
+
+            float proj = Vector3.Dot(df, dir);
+            if (proj <= 0f || proj >= enemyDist) return false;
+
+            Vector3 perp = df - dir * proj;
+            return perp.sqrMagnitude < 0.25f; // 0.5m以内
+        }
+
+        // -------------------------
+        // Move (danger回避込み)
+        // -------------------------
+        private bool TryGetSafeNextStep(Vector3 myPos, Vector3 target, out Vector3 next)
+        {
+            next = myPos;
+
+            if (!team.TryGetNextStepOnGrid(myPos, target, out Vector3 n))
+                return false;
+
+            Vector3Int c = team.WorldToCell(n);
+            if (!IsDanger(c))
+            {
+                next = n;
+                return true;
+            }
+
+            // 次セルが危険なら、近傍の安全セルへ
+            Vector3Int myCell = team.WorldToCell(myPos);
+
+            Vector3Int[] cand =
+            {
+                new Vector3Int(myCell.x + 1, 0, myCell.z),
+                new Vector3Int(myCell.x - 1, 0, myCell.z),
+                new Vector3Int(myCell.x, 0, myCell.z + 1),
+                new Vector3Int(myCell.x, 0, myCell.z - 1),
+            };
+
+            float best = float.PositiveInfinity;
+            Vector3Int bestCell = myCell;
+            bool found = false;
+
+            for (int i = 0; i < cand.Length; i++)
+            {
+                Vector3Int cc = cand[i];
+                if (!InGrid(cc)) continue;
+                if (!team.IsWalkable(cc)) continue;
+                if (IsDanger(cc)) continue;
+
+                Vector3 w = team.CellToWorld(cc);
+                float d = (w - target).sqrMagnitude;
+                if (d < best)
+                {
+                    best = d;
+                    bestCell = cc;
+                    found = true;
+                }
+            }
+
+            if (!found)
+            {
+                // 安全セルがないなら停止より「強制1歩」（anti-stall）
+                if (TryForceStepToResetStall(out Vector3 step))
+                {
+                    next = step;
+                    return true;
+                }
+                return false;
+            }
+
+            next = team.CellToWorld(bestCell);
+            return true;
+        }
+
+        private void MoveToward(Vector3 from, Vector3 to, float speed)
+        {
+            Vector3 dir = (to - from);
+            dir.y = 0f;
+            if (dir.sqrMagnitude < 0.0001f)
+            {
+                SetMoveSpeedRatio(0f);
+                return;
+            }
+            MoveDirectionSafe(dir.normalized, speed);
+        }
+
+        private void MoveDirectionSafe(Vector3 dir, float speed)
+        {
+            // 壁に突っ込む無駄を抑える
+            float wall = DistanceToWall(dir);
+            if (wall < 0.75f)
+            {
+                Vector3 left = new Vector3(-dir.z, 0f, dir.x);
+                Vector3 right = new Vector3(dir.z, 0f, -dir.x);
+                dir = (DistanceToWall(left) > DistanceToWall(right)) ? left : right;
+            }
+
+            // 次セルが危険なら止める…ではなく「別方向」か「強制1歩」へ逃がす
+            Vector3Int myCell = team.WorldToCell(GetPosition());
+            Vector3Int nextCell = myCell + new Vector3Int(Mathf.RoundToInt(dir.x), 0, Mathf.RoundToInt(dir.z));
+            if (InGrid(nextCell) && IsDanger(nextCell))
+            {
+                if (TryForceStepToResetStall(out Vector3 step))
+                {
+                    Vector3 d = (step - GetPosition());
+                    d.y = 0f;
+                    if (d.sqrMagnitude > 0.0001f)
+                    {
+                        SetDirection(d.normalized);
+                        SetMoveSpeedRatio(Mathf.Clamp01(speed));
+                        return;
+                    }
+                }
+                SetMoveSpeedRatio(0f);
+                return;
+            }
+
+            SetDirection(dir);
+            SetMoveSpeedRatio(Mathf.Clamp01(speed));
+        }
+
+        // -------------------------
+        // Target selection
+        // -------------------------
+        private Vector3 PickTarget(Vector3 myPos)
+        {
+            // 敵優先：近い方
+            Vector3 bestEnemy = myPos;
+            float best = float.PositiveInfinity;
+            bool any = false;
+
+            for (int i = 0; i < 2; i++)
+            {
+                if (team.TryGetEnemy(i, out Vector3 epos, out bool alive) && alive)
+                {
+                    float d = (epos - myPos).sqrMagnitude;
+                    if (d < best)
+                    {
+                        best = d;
+                        bestEnemy = epos;
+                        any = true;
+                    }
+                }
+            }
+
+            if (any)
+            {
+                if (selfRole == 0)
+                {
+                    // 攻め：敵近辺の「安全」セルへ
+                    return FindSafeNear(bestEnemy, 2);
+                }
+                else
+                {
+                    // 回り込み：敵の横
+                    GameObject friend = GetFriend();
+                    Vector3 fpos = friend ? friend.transform.position : myPos;
+                    Vector3 v = (bestEnemy - fpos);
+                    v.y = 0f;
+
+                    if (v.sqrMagnitude < 0.01f) return bestEnemy;
+
+                    v.Normalize();
+                    Vector3 side = new Vector3(-v.z, 0f, v.x);
+
+                    Vector3 c1 = bestEnemy + side * 3f;
+                    Vector3 c2 = bestEnemy - side * 3f;
+
+                    Vector3 s1 = FindSafeNear(c1, 2);
+                    Vector3 s2 = FindSafeNear(c2, 2);
+
+                    float d1 = (s1 - myPos).sqrMagnitude;
+                    float d2 = (s2 - myPos).sqrMagnitude;
+                    return (d1 < d2) ? s1 : s2;
+                }
+            }
+
+            // 敵がいない：アイテムへ（必要時のみ）
+            if (GameManager.instance != null)
+            {
+                int n = GameManager.instance.NumItems();
+                Vector3 bestItem = myPos;
+                float bestD = float.PositiveInfinity;
+
+                for (int i = 0; i < n; i++)
+                {
+                    if (!GameManager.instance.IsItemAvailable(i))
+                        continue;
+
+                    Vector3 ipos = GameManager.instance.ItemPosition(i);
+                    float d = (ipos - myPos).sqrMagnitude;
+                    if (d < bestD)
+                    {
+                        bestD = d;
+                        bestItem = ipos;
+                    }
+                }
+
+                return FindSafeNear(bestItem, 2);
+            }
+
+            return myPos;
+        }
+
+        private Vector3 FindSafeNear(Vector3 world, int radiusCells)
+        {
+            Vector3Int c = team.WorldToCell(world);
+            if (!InGrid(c)) return world;
+
+            if (!IsDanger(c) && team.IsWalkable(c))
+                return team.CellToWorld(c);
+
+            Vector3Int best = c;
+            float bestScore = float.NegativeInfinity;
+
+            for (int dx = -radiusCells; dx <= radiusCells; dx++)
+            {
+                for (int dz = -radiusCells; dz <= radiusCells; dz++)
+                {
+                    Vector3Int n = new Vector3Int(c.x + dx, 0, c.z + dz);
+                    if (!InGrid(n)) continue;
+                    if (!team.IsWalkable(n)) continue;
+                    if (IsDanger(n)) continue;
+
+                    float score = -Mathf.Abs(dx) - Mathf.Abs(dz);
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        best = n;
+                    }
+                }
+            }
+
+            return team.CellToWorld(best);
+        }
     }
 }
